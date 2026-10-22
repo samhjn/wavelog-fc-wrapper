@@ -1,0 +1,67 @@
+edition: 3.0.0
+name: wavelog-fc-wrapper
+access: default
+resources:
+  wavelog:
+    component: fc3
+    props:
+      region: ${env('FC_REGION')}
+      functionName: ${env('FC_FUNCTION_NAME')}
+      description: Wavelog on FC with NAS and an external MySQL database
+      runtime: custom-container
+      cpu: 0.5
+      memorySize: 1024
+      diskSize: 512
+      timeout: 900
+      # Conservative default: serialize installation, migrations and cron.
+      # Internal loopback requests do not count against FC concurrency.
+      instanceConcurrency: 1
+      concurrencyConfig:
+        reservedConcurrency: 1
+      internetAccess: true
+      role: ${env('FC_ROLE')}
+      customContainerConfig:
+        image: ${env('FC_IMAGE')}
+        port: 9000
+        healthCheckConfig:
+          httpGetUrl: /healthz
+          initialDelaySeconds: 0
+          periodSeconds: 3
+          timeoutSeconds: 2
+          failureThreshold: 5
+          successThreshold: 1
+      environmentVariables:
+        CI_ENV: docker
+        WAVELOG_BASE_URL: ${env('WAVELOG_BASE_URL')}
+        WAVELOG_CRON_TOKEN: ${env('WAVELOG_CRON_TOKEN')}
+        WAVELOG_INSTALL_TOKEN: ${env('WAVELOG_INSTALL_TOKEN')}
+        WAVELOG_INSTALL_ENABLED: ${env('WAVELOG_INSTALL_ENABLED')}
+      vpcConfig:
+        vpcId: ${env('FC_VPC_ID')}
+        vSwitchIds:
+          - ${env('FC_VSWITCH_ID')}
+        securityGroupId: ${env('FC_SECURITY_GROUP_ID')}
+      nasConfig:
+        userId: 33
+        groupId: 33
+        mountPoints:
+          - serverAddr: ${env('FC_NAS_SERVER')}
+            mountDir: /mnt/wavelog
+      logConfig: auto
+      asyncInvokeConfig:
+        maxAsyncEventAgeInSeconds: 60
+        maxAsyncRetryAttempts: 0
+      triggers:
+        - triggerName: http
+          triggerType: http
+          qualifier: LATEST
+          triggerConfig:
+            authType: anonymous
+            methods: [GET, POST, PUT, DELETE, HEAD, OPTIONS, PATCH]
+        - triggerName: cron
+          triggerType: timer
+          qualifier: LATEST
+          triggerConfig:
+            cronExpression: '0 * * * * *'
+            enable: true
+            payload: ${env('WAVELOG_CRON_TOKEN')}

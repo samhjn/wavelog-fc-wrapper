@@ -1,0 +1,10 @@
+application/config/docker
+application/cache
+application/logs
+uploads
+userdata
+backup
+updates
+assets/qslcard
+assets/resources
+images/eqsl_card_images
