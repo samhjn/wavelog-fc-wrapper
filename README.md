@@ -109,7 +109,7 @@ GitHub Actions 自动构建并运行同一测试；它不推送镜像或部署�
 
 ## 升级与运行时补丁
 
-1. 备份数据库和 NAS，停 Timer，确认没有导入或后台更新正在执行。
+1. 备份数据库和 NAS，把 `s.yaml` 中 Timer 的 `enable` 改为 `false` 后部署，确认没有导入或后台更新正在执行。在升级检查结束前保持该值为 `false`，避免后续 `s deploy` 意外重新开启 Timer。
 2. 升级 Wavelog 时修改 Dockerfile 中 `WAVELOG_IMAGE` 的固定版本，同时更新 `WAVELOG_GIT_DESCRIBE`，构建并通过测试。可将应用镜像固定到 digest。
 3. 只更新 PHP 时保留 Wavelog 版本，重新 `docker buildx build --pull ... --push .`；可通过 `--build-arg PHP_IMAGE=...` 选择经过验证的兼容 PHP 镜像。
 4. 修改 `FC_IMAGE` 到新 digest，`s deploy`，串行完成 Wavelog 的数据库迁移，检查登录、ADIF/API、QSL 和 cron 后恢复 Timer。

@@ -4,6 +4,7 @@ import http.cookiejar
 import json
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -30,6 +31,12 @@ class LifecycleTest(unittest.TestCase):
         cls.cron_token = secrets.token_hex(32)
         cls.install_token = secrets.token_hex(32)
         cls.password = secrets.token_hex(16)
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            cls.port = listener.getsockname()[1]
+        cls.url = "http://127.0.0.1:" + str(cls.port)
+        cls.cookies = http.cookiejar.CookieJar()
+        cls.client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cls.cookies))
         cls.addClassCleanup(cls.cleanup)
         docker("network", "create", cls.network)
         docker("volume", "create", cls.volume)
@@ -48,7 +55,8 @@ class LifecycleTest(unittest.TestCase):
     @classmethod
     def cleanup(cls):
         for name in (cls.web, cls.db):
-            print(docker("logs", "--tail", "100", name, check=False).stdout)
+            logs = docker("logs", "--tail", "100", name, check=False)
+            print(logs.stdout, logs.stderr)
             docker("rm", "-f", name, check=False)
         docker("volume", "rm", cls.volume, check=False)
         docker("network", "rm", cls.network, check=False)
@@ -61,14 +69,11 @@ class LifecycleTest(unittest.TestCase):
     @classmethod
     def start_web(cls, install):
         docker("run", "-d", "--name", cls.web, "--network", cls.network,
-               "-p", "127.0.0.1::9000", "-v", cls.volume + ":/mnt/wavelog",
-               "-e", "WAVELOG_BASE_URL=http://localhost/",
+               "-p", "127.0.0.1:" + str(cls.port) + ":9000", "-v", cls.volume + ":/mnt/wavelog",
+               "-e", "WAVELOG_BASE_URL=" + cls.url + "/",
                "-e", "WAVELOG_CRON_TOKEN=" + cls.cron_token,
                "-e", "WAVELOG_INSTALL_TOKEN=" + cls.install_token,
                "-e", "WAVELOG_INSTALL_ENABLED=" + str(install).lower(), IMAGE)
-        cls.url = "http://" + docker("port", cls.web, "9000").stdout.strip()
-        cls.cookies = http.cookiejar.CookieJar()
-        cls.client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cls.cookies))
         for _ in range(60):
             try:
                 if urllib.request.urlopen(cls.url + "/healthz", timeout=2).status == 200:
@@ -114,7 +119,7 @@ class LifecycleTest(unittest.TestCase):
                     db_password=self.password, directory="", firstname="Test", lastname="Operator",
                     username="testadmin", callsign="N0CALL", password=self.password,
                     cnfm_password=self.password, userlocator="AA00AA", user_email="test@example.com",
-                    timezone="0", websiteurl="http://localhost/", global_call_lookup="",
+                    timezone="0", websiteurl=self.url + "/", global_call_lookup="",
                     log_threshold="1", dxcc="291", city="Test", userlanguage="english",
                     form_token=form_token)
         code, page = self.request("/install/run.php", data, auth=True)
@@ -130,20 +135,33 @@ class LifecycleTest(unittest.TestCase):
         code, page = self.request("/index.php/user/login")
         self.assertEqual(code, 200, page[:1000])
         self.assertIn('name="user_name"', page)
+        code, page = self.request("/index.php/user/login", {
+            "user_name": "testadmin", "user_password": self.password, "id": ""})
+        self.assertEqual(code, 200, page[:1000])
+        self.assertNotIn('name="user_password"', page)
+        # Verify the CI session location, not only PHP's installer session path.
+        sessions = docker("exec", self.web, "sh", "-c", "ls /mnt/wavelog/sessions/ci_wavelog*").stdout
+        self.assertTrue(sessions)
         # Avoid contacting external logbook services in CI.
         self.sql("UPDATE cron SET enabled = 0")
+        # A deterministic local job verifies upstream's nested localhost:80 call.
+        docker("exec", self.web, "sh", "-c",
+               "printf '%s' '<?php file_put_contents(\"/mnt/wavelog/uploads/cron-child.txt\", \"ran\"); echo \"ok\";' > fc-test-job.php")
+        self.sql("UPDATE cron SET enabled=1, expression='* * * * *', function='fc-test-job.php' WHERE id='clublog_upload'")
         code, body = self.invoke()
         self.assertEqual(code, 200, body)
         self.assertEqual(json.loads(body)["status"], "ok")
+        self.assertEqual(self.request("/uploads/cron-child.txt"), (200, "ran"))
         self.assertEqual(json.loads(self.invoke()[1])["status"], "rate_limited")
 
         # Cross-request cookie/session storage and arbitrary uploaded data survive
         # destruction of the container, not merely restarting its process.
         marker = secrets.token_hex(16)
-        php = ('$s="fcwrapperpersist"; session_id($s); session_start(); '
+        php = ('session_start(); echo session_id(); '
                '$_SESSION["marker"]="' + marker + '"; session_write_close(); '
                'file_put_contents("/var/www/html/uploads/persist.txt", "' + marker + '");')
-        docker("exec", "--user", "33:33", self.web, "php", "-r", php)
+        session_id = docker("exec", "--user", "33:33", self.web, "php", "-r", php).stdout
+        self.assertTrue(session_id)
         # Uploaded PHP and .htaccess must never become executable configuration.
         docker("exec", self.web, "sh", "-c",
                "printf '<?php echo 12345;' > uploads/unsafe.php; printf 'Require all granted' > uploads/.htaccess")
@@ -158,9 +176,13 @@ class LifecycleTest(unittest.TestCase):
         after = docker("exec", self.web, "sha256sum", "application/config/docker/config.php").stdout
         self.assertEqual(before, after)
         result = docker("exec", "--user", "33:33", self.web, "php", "-r",
-                        'session_id("fcwrapperpersist"); session_start(); echo $_SESSION["marker"];').stdout
+                        'session_id("' + session_id + '"); session_start(); echo $_SESSION["marker"];').stdout
         self.assertEqual(result, marker)
         self.assertEqual(self.request("/index.php/user/login")[0], 200)
+        code, page = self.request("/index.php/cron")
+        self.assertEqual(code, 200)
+        self.assertIn("Cron Manager", page)
+        self.assertNotIn('name="user_password"', page)
 
     def test_missing_mount_fails_closed(self):
         result = docker("run", "--rm", IMAGE, check=False)
